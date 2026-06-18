@@ -315,14 +315,174 @@ def tabela_slr(estados, transicoes, prods, terminais, follow, inicio_aum):
 # 7. RECONHECIMENTO (driver shift-reduce) + TABELA DE SIMBOLOS
 # ---------------------------------------------------------------------
 
+# Caracteristica semantica escolhida nesta etapa:
+# o identificador da condicao de um comando deve aparecer em pelo menos
+# um dos blocos associados ao mesmo comando. Para viabilizar essa analise,
+# a fita pode trazer lexemas no formato 1:nome, por exemplo: 3 1:x 9 1:x $
+
 ROTULO_PARA_TERMINAL = {'3': 'se', '6': 'sai', '9': 'foi', '1': 'id'}
 
 
-def fita_para_terminais(fita_str):
-    brutos = fita_str.replace(FIM, ' ').split()
-    terms = [ROTULO_PARA_TERMINAL.get(t, t) for t in brutos]
-    terms.append(FIM)
-    return terms
+def item_lexico_para_token(item_bruto, ordem):
+    # Converte um item da fita em um token estruturado.
+    # Exemplos:
+    #   '3'   -> terminal 'se'
+    #   '1:x' -> terminal 'id' com lexema 'x'
+    if ':' in item_bruto:
+        rotulo, lexema = item_bruto.split(':', 1)
+    else:
+        rotulo, lexema = item_bruto, None
+
+    terminal = ROTULO_PARA_TERMINAL.get(rotulo, rotulo)
+    if lexema is None:
+        lexema = terminal
+
+    return {
+        'ordem': ordem,
+        'rotulo': rotulo,
+        'terminal': terminal,
+        'lexema': lexema,
+    }
+
+
+def fita_para_tokens(fita_str):
+    # Separa a fita em tokens e adiciona explicitamente o marcador de fim.
+    itens_brutos = fita_str.replace(FIM, ' ').split()
+    tokens = [item_lexico_para_token(item_bruto, ordem)
+              for ordem, item_bruto in enumerate(itens_brutos, start=1)]
+    tokens.append({'ordem': len(tokens) + 1, 'rotulo': FIM, 'terminal': FIM, 'lexema': FIM})
+    return tokens
+
+
+def fita_para_terminais(fita):
+    # Gera a visão "somente sintática" da fita, descartando os lexemas.
+    if not fita:
+        return []
+    if isinstance(fita[0], dict):
+        return [token['terminal'] for token in fita]
+    return fita
+
+
+def criar_entrada_tabela_simbolos(token):
+    # Cada identificador reconhecido ganha uma entrada na TS.
+    # Os campos 'papel' e 'comando' são preenchidos depois, durante as reduções.
+    categoria = 'identificador' if token['terminal'] == 'id' else 'palavra_reservada'
+    return {
+        'ordem': token['ordem'],
+        'token': token['terminal'],
+        'lexema': token['lexema'],
+        'categoria': categoria,
+        'tipo': '-',
+        'valor': '-',
+        'papel': '-',
+        'comando': '-',
+    }
+
+
+def atualizar_entradas_do_bloco(entradas_bloco, papel, numero_comando):
+    # Marca, na TS, se o identificador apareceu no bloco principal ou no bloco após 'sai'.
+    for entrada_tabela in entradas_bloco:
+        entrada_tabela['papel'] = papel
+        entrada_tabela['comando'] = numero_comando
+
+
+def executar_acao_semantica(nao_terminal, corpo_producao, atributos_reduzidos,
+                            tabela_simbolos, erros_semanticos, contexto_semantico):
+    # Implementa o esquema de tradução: a cada redução sintática,
+    # sintetiza atributos e, quando necessário, atualiza a TS e registra erros semânticos.
+    if nao_terminal == 'Bloco' and list(corpo_producao) == ['id']:
+        entrada_identificador = atributos_reduzidos[0]['entrada_ts']
+        return {
+            'tipo': 'Bloco',
+            'identificadores': [atributos_reduzidos[0]['lexema']],
+            'entradas_ts': [entrada_identificador],
+        }
+
+    if nao_terminal == "Comando'" and not corpo_producao:
+        return {
+            'tipo': 'ComplementoComando',
+            'identificadores': [],
+            'entradas_ts': [],
+            'possui_saida': False,
+        }
+
+    if nao_terminal == "Comando'" and list(corpo_producao) == ['sai', 'Bloco']:
+        atributos_bloco_saida = atributos_reduzidos[1]
+        return {
+            'tipo': 'ComplementoComando',
+            'identificadores': atributos_bloco_saida['identificadores'],
+            'entradas_ts': atributos_bloco_saida['entradas_ts'],
+            'possui_saida': True,
+        }
+
+    if nao_terminal == 'Comando' and list(corpo_producao) == ['se', 'id', 'foi', 'Bloco', "Comando'"]:
+        # Nesta redução temos informação suficiente para validar a regra semântica do comando.
+        contexto_semantico['contador_comandos'] += 1
+        numero_comando = contexto_semantico['contador_comandos']
+
+        atributos_identificador_condicao = atributos_reduzidos[1]
+        atributos_bloco_principal = atributos_reduzidos[3]
+        atributos_complemento = atributos_reduzidos[4]
+
+        entrada_condicao = atributos_identificador_condicao['entrada_ts']
+        entrada_condicao['papel'] = 'condicao'
+        entrada_condicao['comando'] = numero_comando
+
+        atualizar_entradas_do_bloco(
+            atributos_bloco_principal['entradas_ts'],
+            'bloco_principal',
+            numero_comando,
+        )
+
+        if atributos_complemento.get('possui_saida'):
+            atualizar_entradas_do_bloco(
+                atributos_complemento['entradas_ts'],
+                'bloco_saida',
+                numero_comando,
+            )
+
+        identificadores_do_comando = (
+            atributos_bloco_principal['identificadores'] +
+            atributos_complemento['identificadores']
+        )
+        identificador_condicao = atributos_identificador_condicao['lexema']
+
+        # Regra escolhida: o identificador da condição deve reaparecer em algum bloco.
+        if identificador_condicao not in identificadores_do_comando:
+            erros_semanticos.append(
+                f"erro semantico no comando {numero_comando}: o identificador da condicao "
+                f"'{identificador_condicao}' deve aparecer em pelo menos um bloco do comando"
+            )
+
+        return {
+            'tipo': 'Comando',
+            'numero_comando': numero_comando,
+            'identificador_condicao': identificador_condicao,
+            'identificadores_bloco': identificadores_do_comando,
+        }
+
+    if nao_terminal == 'Lista' and list(corpo_producao) == ['Comando']:
+        return {
+            'tipo': 'Lista',
+            'comandos': [atributos_reduzidos[0]],
+        }
+
+    if nao_terminal == 'Lista' and list(corpo_producao) == ['Lista', 'Comando']:
+        return {
+            'tipo': 'Lista',
+            'comandos': atributos_reduzidos[0]['comandos'] + [atributos_reduzidos[1]],
+        }
+
+    if nao_terminal == 'Programa' and list(corpo_producao) == ['Lista']:
+        return {
+            'tipo': 'Programa',
+            'comandos': atributos_reduzidos[0]['comandos'],
+        }
+
+    return {
+        'tipo': nao_terminal,
+        'entradas_ts': [],
+    }
 
 
 def analisar(fita, acao, ir, prods):
@@ -332,19 +492,25 @@ def analisar(fita, acao, ir, prods):
     # prods -> lista de produções, cada uma como (lhs, rhs)
     #          ex: prods[3] = ('E', ['E', '+', 'T'])
 
+    terminais_fita = fita_para_terminais(fita)
     pilha_estados  = [0]   # pilha de estados; começa no estado inicial 0
     pilha_simbolos = []    # pilha de símbolos (terminais e não-terminais) só para visualização
+    pilha_atributos = []   # pilha paralela usada pelas ações semânticas nas reduções
     posicao_fita = 0       # cursor na fita (qual token estamos lendo)
     historico_passos = []  # log de cada passo (para imprimir o trace da análise)
     historico_reducoes = []  # ordem das reduções aplicadas (deriva a árvore / derivação à direita reversa)
+    tabela_simbolos = []   # tabela de símbolos construída ao longo dos shifts de identificadores
+    erros_semanticos = []  # lista acumulada de mensagens semânticas
+    contexto_semantico = {'contador_comandos': 0}  # controle auxiliar para rotular cada comando
 
     while True:
         estado_atual = pilha_estados[-1]   # estado no topo da pilha
-        terminal_atual = fita[posicao_fita]                # terminal atual (lookahead)
+        token_atual = fita[posicao_fita]
+        terminal_atual = token_atual['terminal']                # terminal atual (lookahead)
         acao_atual = acao.get((estado_atual, terminal_atual))  # consulta a tabela ACTION
 
         conteudo_pilha = ' '.join(pilha_simbolos) or 'ε'  # snapshot da pilha (para o log)
-        entrada_restante = ' '.join(fita[posicao_fita:])  # entrada que ainda falta consumir
+        entrada_restante = ' '.join(terminais_fita[posicao_fita:])  # entrada que ainda falta consumir
 
         # ---- 1) Célula vazia na ACTION => erro sintático ----
         if acao_atual is None:
@@ -353,25 +519,55 @@ def analisar(fita, acao, ir, prods):
             terminais_esperados = sorted({terminal for (estado, terminal) in acao if estado == estado_atual})
             return (False,
                     f"erro sintatico na posicao {posicao_fita + 1}: encontrado '{terminal_atual}', "
-                    f"esperado um de {terminais_esperados}", historico_passos, historico_reducoes)
+                    f"esperado um de {terminais_esperados}", historico_passos,
+                    historico_reducoes, tabela_simbolos, erros_semanticos)
 
         # ---- 2) SHIFT: act = ('s', N) => empilha o terminal e vai pro estado N ----
         if acao_atual[0] == 's':
             historico_passos.append((conteudo_pilha, entrada_restante, f"empilha '{terminal_atual}' -> estado {acao_atual[1]}"))
             pilha_estados.append(acao_atual[1])   # empilha o novo estado
             pilha_simbolos.append(terminal_atual)       # empilha o símbolo lido
+            if terminal_atual == 'id':
+                # A TS é criada no momento em que o identificador entra na pilha.
+                entrada_tabela = criar_entrada_tabela_simbolos(token_atual)
+                tabela_simbolos.append(entrada_tabela)
+                pilha_atributos.append({
+                    'tipo': 'id',
+                    'lexema': token_atual['lexema'],
+                    'entrada_ts': entrada_tabela,
+                })
+            else:
+                pilha_atributos.append({
+                    'tipo': terminal_atual,
+                    'lexema': token_atual['lexema'],
+                })
             posicao_fita += 1                        # avança o cursor (consome o token)
 
         # ---- 3) REDUCE: act = ('r', N) => aplica a produção prods[N] ----
         elif acao_atual[0] == 'r':
             nao_terminal_reduzido, corpo_producao = prods[acao_atual[1]]        # lado esquerdo e direito da produção
+            atributos_reduzidos = []
             # desempilha |rhs| símbolos/estados (o tamanho do lado direito)
             for _ in range(len(corpo_producao)):
                 pilha_estados.pop()
                 pilha_simbolos.pop()
+                atributos_reduzidos.append(pilha_atributos.pop())
+            atributos_reduzidos.reverse()
+
             estado_topo_apos_reducao = pilha_estados[-1]        # estado que sobrou no topo após desempilhar
             pilha_estados.append(ir[(estado_topo_apos_reducao, nao_terminal_reduzido)])  # consulta GOTO e empilha o estado destino
             pilha_simbolos.append(nao_terminal_reduzido)              # empilha o não-terminal lhs
+            # A redução dispara a ação semântica correspondente ao não terminal reconhecido.
+            pilha_atributos.append(
+                executar_acao_semantica(
+                    nao_terminal_reduzido,
+                    corpo_producao,
+                    atributos_reduzidos,
+                    tabela_simbolos,
+                    erros_semanticos,
+                    contexto_semantico,
+                )
+            )
             corpo_formatado = ' '.join(corpo_producao) if corpo_producao else EPS
             historico_passos.append((conteudo_pilha, entrada_restante, f"reduz  {nao_terminal_reduzido} -> {corpo_formatado}"))
             historico_reducoes.append((nao_terminal_reduzido, corpo_producao))     # registra a redução
@@ -379,17 +575,10 @@ def analisar(fita, acao, ir, prods):
         # ---- 4) ACCEPT: act = ('acc',) => cadeia reconhecida ----
         else:  # 'acc'
             historico_passos.append((conteudo_pilha, entrada_restante, 'ACEITA'))
-            return True, "cadeia ACEITA", historico_passos, historico_reducoes
-
-def montar_tabela_simbolos(fita, fita_str):
-    categorias_por_token = {'se': 'palavra_reservada', 'foi': 'palavra_reservada',
-                            'sai': 'palavra_reservada', 'id': 'identificador'}
-    tabela_simbolos = []
-    for ordem, token in enumerate(terminal for terminal in fita if terminal != FIM):
-        tabela_simbolos.append({'ordem': ordem + 1, 'token': token,
-                   'categoria': categorias_por_token.get(token, '?'),
-                   'tipo': '-', 'valor': '-'})
-    return tabela_simbolos
+            if erros_semanticos:
+                mensagem = 'cadeia sintaticamente aceita, mas com erro(s) semantico(s)'
+                return False, mensagem, historico_passos, historico_reducoes, tabela_simbolos, erros_semanticos
+            return True, 'cadeia ACEITA', historico_passos, historico_reducoes, tabela_simbolos, erros_semanticos
 
 
 # ---------------------------------------------------------------------
@@ -530,23 +719,51 @@ def construir_parser():
 
 
 def reconhecer(fita_str, parser):
-    fita = fita_para_terminais(fita_str)
-    aceito, mensagem_resultado, historico_passos, _historico_reducoes = analisar(fita, parser['acao'], parser['ir'], parser['prods'])
-    tabela_simbolos = montar_tabela_simbolos(fita, fita_str)
+    fita = fita_para_tokens(fita_str)
+    terminais_fita = fita_para_terminais(fita)
+    aceito, mensagem_resultado, historico_passos, _historico_reducoes, tabela_simbolos, erros_semanticos = analisar(
+        fita,
+        parser['acao'],
+        parser['ir'],
+        parser['prods'],
+    )
 
     print(f"\nFITA de entrada : {fita_str}")
-    print(f"Terminais       : {' '.join(fita)}")
-    print(f"\n  {'PILHA':<28} {'ENTRADA':<18} ACAO")
-    print("  " + "-" * 70)
+    print(f"Terminais       : {' '.join(terminais_fita)}")
+    largura_coluna_pilha = max(len('PILHA'), *(len(conteudo_pilha) for conteudo_pilha, _, _ in historico_passos))
+    largura_coluna_entrada = max(len('ENTRADA'), *(len(entrada_restante) for _, entrada_restante, _ in historico_passos))
+    largura_coluna_acao = max(len('ACAO'), *(len(acao_executada) for _, _, acao_executada in historico_passos))
+    linha_cabecalho = (
+        f"\n  {'PILHA':<{largura_coluna_pilha}}  "
+        f"{'ENTRADA':<{largura_coluna_entrada}}  "
+        f"{'ACAO':<{largura_coluna_acao}}"
+    )
+    largura_total_tabela = largura_coluna_pilha + largura_coluna_entrada + largura_coluna_acao + 6
+
+    print(linha_cabecalho)
+    print("  " + "-" * largura_total_tabela)
     for conteudo_pilha, entrada_restante, acao_executada in historico_passos:
-        print(f"  {conteudo_pilha:<28} {entrada_restante:<18} {acao_executada}")
+        print(
+            f"  {conteudo_pilha:<{largura_coluna_pilha}}  "
+            f"{entrada_restante:<{largura_coluna_entrada}}  "
+            f"{acao_executada:<{largura_coluna_acao}}"
+        )
     print(f"\n  RESULTADO: {mensagem_resultado}")
-    if aceito:
+    if erros_semanticos:
+        print("\n  ERROS SEMANTICOS:")
+        for erro_semantico in erros_semanticos:
+            print(f"  - {erro_semantico}")
+
+    if tabela_simbolos:
         print("\n  TABELA DE SIMBOLOS:")
-        print(f"  {'Ordem':<6} {'Token':<6} {'Categoria':<18} {'Tipo':<6} Valor")
-        print("  " + "-" * 48)
+        print(f"  {'Ordem':<6} {'Token':<6} {'Lexema':<12} {'Categoria':<18} {'Papel':<16} {'Cmd':<4} {'Tipo':<6} Valor")
+        print("  " + "-" * 92)
         for entrada_tabela in tabela_simbolos:
-            print(f"  {entrada_tabela['ordem']:<6} {entrada_tabela['token']:<6} {entrada_tabela['categoria']:<18} {entrada_tabela['tipo']:<6} {entrada_tabela['valor']}")
+            print(
+                f"  {entrada_tabela['ordem']:<6} {entrada_tabela['token']:<6} {entrada_tabela['lexema']:<12} "
+                f"{entrada_tabela['categoria']:<18} {entrada_tabela['papel']:<16} {entrada_tabela['comando']:<4} "
+                f"{entrada_tabela['tipo']:<6} {entrada_tabela['valor']}"
+            )
 
     return aceito
 
@@ -559,13 +776,17 @@ if __name__ == '__main__':
     print("=" * 64)
 
     # Validas
-    #reconhecer('3 1 9 1 $', parser)          # se id foi id
-    #reconhecer('3 1 9 1 6 1 $', parser)      # se id foi id sai id
-    #reconhecer('3 1 9 1 3 1 9 1 $', parser)  # dois comandos
+    #reconhecer('3 1:x 9 1:x $', parser)                         # se x foi x
+    #reconhecer('3 1:x 9 1:y 6 1:x $', parser)                   # se x foi y sai x
+    #reconhecer('3 1:x 9 1:x 3 1:y 9 1:y $', parser)             # dois comandos validos
+    #reconhecer('3 1:x 9 1:y 6 1:x $', parser)                   # se x foi y sai x
+    reconhecer('3 1:teste 9 1:teste 6 1:teste $', parser)        # se teste foi teste sai teste
+    
+    # Semantica invalida
+    #reconhecer('3 1:x 9 1:y $', parser)          # x nao aparece no bloco
+    #reconhecer('3 1:x 9 1:y 6 1:y $', parser)    # x nao aparece no bloco principal, só no de saida
 
     ## Invalidas
-    reconhecer('3 9 1 $', parser)            # se foi id  (falta condicao)
+    #reconhecer('3 9 1 $', parser)            # se foi id  (falta condicao)
     #reconhecer('1 9 1 $', parser)            # id foi id  (nao inicia com se)
     #reconhecer('3 1 9 1 6 $', parser)        # sai sem bloco
-
-
