@@ -559,7 +559,7 @@ if __name__ == '__main__':
     print("=" * 64)
 
     # Validas
-    #reconhecer('3 1 9 1 $', parser)          # se id foi id
+    reconhecer('3 1 9 1 $', parser)          # se id foi id
     #reconhecer('3 1 9 1 6 1 $', parser)      # se id foi id sai id
     #reconhecer('3 1 9 1 3 1 9 1 $', parser)  # dois comandos
 
